@@ -1,0 +1,757 @@
+# ==============================================================
+# Nom du workflow GitHub Actions
+# Ce workflow automatise la détection, l’enrichissement
+# et le reporting des vulnérabilités dans un pipeline MLOps
+# =============================================================
+name: Full Project Automatisation de la gestion des vulnérabilités dans les pipelines MLops
+
+# =============================================================
+# Déclencheurs du workflow
+# - push sur la branche Develop
+# - pull request vers la branche Develop
+# =============================================================
+
+on:
+  push:
+    branches:
+      - Develop
+      - main
+  pull_request:
+    branches:
+      - Develop
+      - main
+
+      
+# =============================================================
+# Variables d’environnement globales
+# =============================================================
+env:
+  # Identifiant unique basé sur l'exécution GitHub
+  # Utilisé pour versionner tous les rapports générés
+  TIMESTAMP: ${{ github.run_id }}
+  IMAGE_NAME: mlapp
+
+jobs:
+  # =============================================================
+  # Job 1 : CodeScan
+  # Objectif :
+  # - Analyse de sécurité du code source Python
+  # - Détection de mauvaises pratiques et failles SAST
+  # Outil :
+  # - Bandit
+  # =============================================================
+  CodeScan:
+    name: Code Security Scan (Bandit)
+    runs-on: [self-hosted, Linux, X64]
+
+    steps:
+      # ---------------------------------------------------------
+      # Étape 1 : Récupération du code source depuis le dépôt Git
+      # ---------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ---------------------------------------------------------
+      # Étape 2 : Installation de Python 3.11
+      # ---------------------------------------------------------
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # ---------------------------------------------------------
+      # Étape 3 : Installation des outils nécessaires
+      # - bandit   : analyse de sécurité du code Python
+      # - tabulate : affichage lisible des résultats en tableau
+      # ---------------------------------------------------------
+      - name: Install Bandit and dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install bandit tabulate
+
+      # ---------------------------------------------------------
+      # Étape 4 : Exécution du scan Bandit
+      # - Analyse récursive du projet
+      # - Rapport JSON versionné
+      # - Le pipeline ne s’arrête pas en cas de vulnérabilités
+      # ---------------------------------------------------------
+      - name: Run Bandit Scan
+        run: |
+          REPORT_DIR="reports/bandit/${{ env.TIMESTAMP }}"
+          mkdir -p "$REPORT_DIR"
+          bandit -r . -f json -o "$REPORT_DIR/bandit-report.json" || true
+          echo "✅ Bandit scan finished"
+
+      # ---------------------------------------------------------
+      # Étape 5 : Affichage des résultats dans la console
+      # - Lecture du rapport JSON
+      # - Transformation en tableau lisible (stdout)
+      # ---------------------------------------------------------
+      - name: Display Bandit Scan Results
+        run: |
+          python - << EOF
+          import json
+          from tabulate import tabulate
+
+          report_file = "reports/bandit/${{ env.TIMESTAMP }}/bandit-report.json"
+          with open(report_file) as f:
+              data = json.load(f)
+
+          vulns = data.get("results", [])
+          if not vulns:
+              print("✅ No issues found by Bandit")
+          else:
+              table = []
+              for v in vulns:
+                  table.append([
+                      v.get("filename"),
+                      v.get("line_number"),
+                      v.get("issue_severity"),
+                      v.get("issue_confidence"),
+                      v.get("issue_text")
+                  ])
+              print("\n🔍 Bandit Scan Results:")
+              print(tabulate(
+                  table,
+                  headers=["File", "Line", "Severity", "Confidence", "Issue"],
+                  tablefmt="github"
+              ))
+          EOF
+
+      # ---------------------------------------------------------
+      # Étape 6 : Archivage du rapport Bandit
+      # - Stockage en tant qu’artifact GitHub
+      # ---------------------------------------------------------
+      - name: Upload Bandit Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-report-${{ env.TIMESTAMP }}
+          path: reports/bandit/${{ env.TIMESTAMP }}/bandit-report.json
+          retention-days: 30
+
+  # =============================================================
+  # Job 2 : DependencyScan
+  # Objectif :
+  # - Analyse des dépendances applicatives
+  # - Détection des CVE connues
+  # Outil :
+  # - Trivy (filesystem scan)
+  # =============================================================
+  DependencyScan:
+    name: Dependency Vulnerability Scan (Trivy)
+    runs-on: [self-hosted, Linux, X64]
+    # Ce job ne démarre qu'après la réussite de CodeScan
+    needs: [CodeScan]
+
+    steps:
+      # ---------------------------------------------------------
+      # Étape 1 : Récupération du code source
+      # ---------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+   
+
+      # ---------------------------------------------------------
+      # Étape 3 : Scan des dépendances du projet
+      # - Analyse automatique des gestionnaires Python
+      # - Génération d’un rapport JSON
+      # ---------------------------------------------------------
+      - name: Run Trivy Dependency Scan
+        run: |
+          REPORT_DIR="reports/dependency/${{ env.TIMESTAMP }}"
+          mkdir -p "$REPORT_DIR"
+
+          trivy fs \
+            --scanners vuln \
+            --format json \
+            --output "$REPORT_DIR/trivy-dependency-report.json" \
+            . || true
+
+          echo "✅ Trivy dependency scan finished"
+
+      # ----------------------------------------------------------
+      # Étape 4 : Installation des dépendances pour affichage
+      # ---------------------------------------------------------
+      - name: Setup Python venv
+        run: |
+          python3 -m venv .venv
+          . .venv/bin/activate
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      # ---------------------------------------------------------
+      # Étape 5 : Affichage des vulnérabilités détectées
+      # ---------------------------------------------------------
+      - name: Display Dependency Scan Results
+        run: |
+          .venv/bin/python << 'EOF'
+          import json
+          from tabulate import tabulate
+
+          report = "reports/dependency/${{ env.TIMESTAMP }}/trivy-dependency-report.json"
+          with open(report) as f:
+              data = json.load(f)
+
+          rows = []
+          for result in data.get("Results", []):
+              target = result.get("Target", "")
+              for vuln in result.get("Vulnerabilities", []) or []:
+                  rows.append([
+                      target,
+                      vuln.get("PkgName"),
+                      vuln.get("InstalledVersion"),
+                      vuln.get("VulnerabilityID"),
+                      vuln.get("Severity"),
+                      vuln.get("Title", "")[:80]
+                  ])
+
+          if not rows:
+              print("✅ No dependency vulnerabilities found")
+          else:
+              print("\n📦 Dependency Scan Results (Trivy):")
+              print(tabulate(
+                  rows,
+                  headers=["Target", "Package", "Version", "CVE", "Severity", "Description"],
+                  tablefmt="github"
+              ))
+          EOF
+
+
+      # ---------------------------------------------------------
+      # Étape 6 : Archivage du rapport Trivy
+      # ---------------------------------------------------------
+      - name: Upload Dependency Scan Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-dependency-report-${{ env.TIMESTAMP }}
+          path: reports/dependency/${{ env.TIMESTAMP }}/trivy-dependency-report.json
+          retention-days: 30
+
+  # =============================================================
+  # Job 3 : ModelScan
+  # Objectif :
+  # - Analyser la sécurité des fichiers de modèles ML
+  # - Détecter les risques liés à la désérialisation
+  # Outil :
+  # - ModelScan
+  # =============================================================
+      
+  ModelScan:
+      name: Model Serialization Security Scan
+      runs-on: [self-hosted, Linux, X64]
+      needs: DependencyScan
+
+      steps:
+        - name: Checkout repository
+          uses: actions/checkout@v4
+
+        # ---------------------------------------------------------
+        # Étape 2 : Création d'un venv pour isoler l'installation Python
+        # ---------------------------------------------------------
+        - name: Setup Python venv
+          run: |
+            python3 -m venv .venv
+            . .venv/bin/activate
+            .venv/bin/pip install --upgrade pip
+            .venv/bin/pip install modelscan==0.8.7
+
+        # ---------------------------------------------------------
+        # Étape 3 : Création du dossier des rapports ModelScan
+        # ---------------------------------------------------------
+        - name: Create Reports Folder
+          run: mkdir -p "reports/models/${{ env.TIMESTAMP }}/official"
+
+        # ---------------------------------------------------------
+        # Étape 4 : Scan des modèles ML + génération JSON
+        # ---------------------------------------------------------
+        - name: Run ModelScan and generate JSON compatible CVEEnrichment
+          run: |
+            REPORT_TXT="reports/models/${{ env.TIMESTAMP }}/official/modelscan-report.txt"
+            REPORT_JSON="reports/models/${{ env.TIMESTAMP }}/official/modelscan-report.json"
+
+            mkdir -p "$(dirname "$REPORT_TXT")"
+
+            # Scan ModelScan
+            .venv/bin/modelscan scan -p ModelApp/model/ | tee "$REPORT_TXT"
+
+            # Conversion TXT -> JSON structuré
+            REPORT_TXT="$REPORT_TXT" REPORT_JSON="$REPORT_JSON" .venv/bin/python3 - << 'PYTHON_CODE'
+            import json
+            import os
+            import re
+
+            txt_file = os.environ["REPORT_TXT"]
+            json_file = os.environ["REPORT_JSON"]
+
+            vulnerabilities = []
+            current_severity = None
+            current_description = None
+            current_source = None
+            inside_issues = False
+
+            with open(txt_file, "r") as f:
+                lines = f.readlines()
+
+            for line in lines:
+                line = line.strip()
+                if line == "--- Issues by Severity ---":
+                    inside_issues = True
+                    continue
+                if line.startswith("--- Errors ---") or line.startswith("--- Skipped ---"):
+                    break
+                if not inside_issues:
+                    continue
+                sev_match = re.match(r'--- (LOW|MEDIUM|HIGH|CRITICAL) ---', line)
+                if sev_match:
+                    current_severity = sev_match.group(1)
+                    continue
+                if line.startswith("- Description:"):
+                    current_description = line.replace("- Description:", "").strip()
+                    continue
+                if line.startswith("- Source:"):
+                    current_source = line.replace("- Source:", "").strip()
+                    vulnerabilities.append({
+                        "id": f"modelscan-{hash(current_source + current_description)}",
+                        "cve": f"modelscan-{hash(current_source + current_description)}",
+                        "file": current_source,
+                        "description": current_description,
+                        "severity": current_severity,
+                        "tool": "ModelScan"
+                    })
+                    current_description = None
+                    current_source = None
+            output = {
+                "summary": {"total_vulnerabilities": len(vulnerabilities)},
+                "vulnerabilities": vulnerabilities
+            }
+
+            with open(json_file, "w") as f:
+                json.dump(output, f, indent=2)
+
+            print(f"✅ ModelScan JSON réel généré : {json_file}")
+            PYTHON_CODE
+
+        # ---------------------------------------------------------
+        # Étape 5 : Archivage du rapport
+        # ---------------------------------------------------------
+        - name: Upload ModelScan Report
+          uses: actions/upload-artifact@v4
+          with:
+            name: modelscan-report-${{ env.TIMESTAMP }}
+            path: reports/models/${{ env.TIMESTAMP }}/official/modelscan-report.json
+            retention-days: 30
+
+  # =============================================================
+  # Job 4 : ContainerScan
+  # Objectif :
+  # - Analyser la configuration des conteneurs AVANT le build
+  # - Scanner uniquement les Dockerfiles (Infrastructure as Code)
+  # - Détecter les mauvaises pratiques Docker :
+  #   * utilisation de root
+  #   * images non pinées (latest)
+  #   * ports exposés inutilement
+  #   * secrets hardcodés
+  #   * permissions dangereuses
+  # =============================================================
+  ContainerScan:
+      name: Container Configuration Scan (Dockerfiles)
+      runs-on: [self-hosted, Linux, X64]
+      needs: ModelScan
+
+      steps:
+        # ---------------------------------------------------------
+        # Étape 1 : Checkout repository
+        # ---------------------------------------------------------
+        - name: Checkout repository
+          uses: actions/checkout@v4
+
+        # ----------------------------------------------------------
+        # Étape 2 : Création et activation d'un venv + installation de tabulate
+        # ---------------------------------------------------------
+        - name: Setup Python virtual environment
+          run: |
+            python3 -m venv .venv
+            . .venv/bin/activate
+            pip install --upgrade pip
+            pip install tabulate
+
+
+        # ---------------------------------------------------------
+        # Étape 4 : Scan Dockerfiles
+        # ---------------------------------------------------------
+        - name: Scan Dockerfiles (IaC)
+          run: |
+            REPORT_DIR="reports/container/${{ env.TIMESTAMP }}/dockerfiles"
+            mkdir -p "$REPORT_DIR"
+
+            find . -name 'Dockerfile*' | while read -r dockerfile; do
+              SAFE_NAME=$(echo "$dockerfile" | tr '/:' '_')
+              echo "🔍 Scanning Dockerfile: $dockerfile"
+              trivy config \
+                --severity CRITICAL,HIGH,MEDIUM,LOW \
+                --format json \
+                --output "${REPORT_DIR}/scan-${SAFE_NAME}.json" \
+                "$dockerfile" || true
+            done
+
+            echo "✅ Dockerfile configuration scan completed"
+
+        # ---------------------------------------------------------
+        # Étape 5 : Affichage console Dockerfile Scan (avec IDs sécurité)
+        # ---------------------------------------------------------
+        - name: Display Dockerfile Scan Results (with Security IDs)
+          run: |
+            . .venv/bin/activate
+            python3 - << 'EOF'
+            import json
+            import glob
+            from tabulate import tabulate
+
+            reports = glob.glob("reports/container/${{ env.TIMESTAMP }}/dockerfiles/*.json")
+
+            rows = []
+
+            for report in reports:
+                with open(report) as f:
+                    data = json.load(f)
+
+                for result in data.get("Results", []) or []:
+                    target = result.get("Target", "")
+                    for misconf in result.get("Misconfigurations", []) or []:
+                        rows.append([
+                            target,
+                            misconf.get("ID"),                 # ID Trivy (DSxxx)
+                            misconf.get("Severity"),
+                            misconf.get("Title"),
+                            misconf.get("Message", "")[:80]
+                        ])
+
+            if not rows:
+                print("✅ No Dockerfile security issues found")
+            else:
+                print("\n🐳 Dockerfile Security Issues (Trivy IaC):")
+                print(tabulate(
+                    rows,
+                    headers=[
+                        "Dockerfile",
+                        "Security ID",
+                        "Severity",
+                        "Rule",
+                        "Details"
+                    ],
+                    tablefmt="github"
+                ))
+            EOF
+
+        # ---------------------------------------------------------
+        # Étape 6 : Upload des rapports
+        # ---------------------------------------------------------
+        - name: Upload Dockerfile Scan Reports
+          uses: actions/upload-artifact@v4
+          with:
+            name: container-dockerfile-scan-${{ env.TIMESTAMP }}
+            path: reports/container/${{ env.TIMESTAMP }}/dockerfiles
+            retention-days: 30
+
+
+# =============================================================
+# Job 5 : CVEEnrichment (utilisation NVD locale)
+# Objectif :
+# - Corréler toutes les vulnérabilités détectées
+# - Enrichir via la base officielle NVD stockée localement sur le runner
+# - Générer un rapport unifié
+# =============================================================
+  CVEEnrichment:
+    name: Enrichissement CVE complet (NVD locale)
+    runs-on: [self-hosted, Linux, X64]
+    needs:
+      - CodeScan
+      - DependencyScan
+      - ModelScan
+      - ContainerScan
+
+    steps:
+      # ---------------------------------------------------------
+      # Étape 1 : Récupération du dépôt
+      # - Nécessaire pour exécuter le script Python de corrélation
+      # ---------------------------------------------------------
+      - name: Récupérer le dépôt
+        uses: actions/checkout@v4
+
+      # ---------------------------------------------------------
+      # Étape 2 : Configuration de Python
+      # ---------------------------------------------------------
+      - name: Configurer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # ---------------------------------------------------------
+      # Étape 3 : Installation des dépendances Python
+      # ---------------------------------------------------------
+      - name: Installer les dépendances Python
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests tqdm tabulate
+
+      # ---------------------------------------------------------
+      # Étapes 4 à 7 : Téléchargement des rapports de scan précédents
+      # ---------------------------------------------------------
+      - name: Télécharger les rapports Bandit
+        uses: actions/download-artifact@v4
+        with:
+          name: bandit-report-${{ env.TIMESTAMP }}
+          path: reports/bandit/${{ env.TIMESTAMP }}
+
+      - name: Télécharger le rapport Trivy
+        uses: actions/download-artifact@v4
+        with:
+          name: trivy-dependency-report-${{ env.TIMESTAMP }}
+          path: reports/dependency/${{ env.TIMESTAMP }}
+
+      - name: Télécharger le rapport ModelScan
+        uses: actions/download-artifact@v4
+        with:
+          name: modelscan-report-${{ env.TIMESTAMP }}
+          path: reports/modelscan/${{ env.TIMESTAMP }}/official
+
+      - name: Télécharger rapports ContainerScan
+        uses: actions/download-artifact@v4
+        with:
+          name: container-dockerfile-scan-${{ env.TIMESTAMP }}
+          path: reports/container/${{ env.TIMESTAMP }}
+
+      # ---------------------------------------------------------
+      # Étape 8 : Enrichissement CVE global avec NVD locale
+      # - Plus besoin de téléchargement NVD
+      # ---------------------------------------------------------
+      - name: Enrichissement CVE complet (NVD locale)
+        run: |
+          OUTPUT_DIR="reports/cve_enrichment/${{ env.TIMESTAMP }}"
+          mkdir -p "$OUTPUT_DIR"
+
+          python scripts/cve_enrichment.py \
+            --nvd-db "/home/runner/nvd_data" \
+            --bandit-report "reports/bandit/${{ env.TIMESTAMP }}" \
+            --trivy-report "reports/dependency/${{ env.TIMESTAMP }}" \
+            --modelscan-report "reports/modelscan/${{ env.TIMESTAMP }}/official" \
+            --container-reports "reports/container/${{ env.TIMESTAMP }}" \
+            --output "$OUTPUT_DIR/enriched_cves.json"
+
+      # ---------------------------------------------------------
+      # Étape 9 : Archivage du rapport CVE enrichi final
+      # ---------------------------------------------------------
+      - name: Uploader le rapport CVE enrichi complet
+        uses: actions/upload-artifact@v4
+        with:
+          name: enriched-cve-report-${{ env.TIMESTAMP }}
+          path: reports/cve_enrichment/${{ env.TIMESTAMP }}/enriched_cves.json
+          retention-days: 30
+
+# =============================================================
+# CD Jobs (main only)
+# =============================================================
+  SecurityGate:
+    name: Security Gate (CVE Policy)
+    runs-on: [self-hosted, Linux, X64]
+    needs: CVEEnrichment
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: enriched-cve-report-${{ github.run_id }}
+          path: reports/cve_enrichment
+
+      - name: Enforce CVE Policy
+        run: |
+          # ---------------------------------------------------------
+          # Locate enriched CVE report
+          # ---------------------------------------------------------
+          REPORT=$(find reports/cve_enrichment -name "enriched_cves.json" | head -n 1)
+
+          if [ -z "$REPORT" ]; then
+            echo "❌ Enriched CVE report not found"
+            exit 1
+          fi
+
+          echo "📄 Using report: $REPORT"
+           python3 - << EOF
+          import json
+          import sys
+
+          # ---------------------------------------------------------
+          # Load CVE report dynamically
+          # ---------------------------------------------------------
+          with open("$REPORT") as f:
+              data = json.load(f)
+
+          critical_findings = []
+
+          # ---------------------------------------------------------
+          # 1 CODE vulnerabilities (nvd_severity)
+          # ---------------------------------------------------------
+          for item in data.get("code", []):
+              if item.get("nvd_severity") == "CRITICAL":
+                  critical_findings.append(
+                      f"[CODE] {item.get('mapped_cve')} in {item.get('file')}"
+                  )
+
+          # ---------------------------------------------------------
+          # 2 Dependency vulnerabilities (severity)
+          # ---------------------------------------------------------
+          for item in data.get("dependencies", []):
+              if item.get("severity") == "CRITICAL":
+                  critical_findings.append(
+                      f"[DEPENDENCY] {item.get('cve')} in {item.get('package')}"
+                  )
+
+          # ---------------------------------------------------------
+          # 3 Model vulnerabilities (severity)
+          # ---------------------------------------------------------
+          for item in data.get("models", []):
+              if item.get("severity") == "CRITICAL":
+                  critical_findings.append(
+                      f"[MODEL] {item.get('id')} in {item.get('file')}"
+                  )
+
+          # ---------------------------------------------------------
+          # 4 Container vulnerabilities (severity)
+          # ---------------------------------------------------------
+          for item in data.get("containers", []):
+              if item.get("severity") == "CRITICAL":
+                  critical_findings.append(
+                      f"[CONTAINER] {item.get('vulnerability_id')} in {item.get('dockerfile')}"
+                  )
+
+          # ---------------------------------------------------------
+          # Enforcement
+          # ---------------------------------------------------------
+          if critical_findings:
+              print("❌ CRITICAL vulnerabilities detected:\n")
+              for finding in critical_findings:
+                  print("-", finding)
+              sys.exit(1)
+
+          print("✅ Security Gate passed - No CRITICAL vulnerabilities detected")
+          EOF
+
+  # =============================================================
+  # Job : DeployOnVM
+  # - Déploiement uniquement si SecurityGate validée
+  # - Build Docker sur la VM
+  # - Scan sécurité de l’image Docker
+  # - Déploiement seulement si aucune vulnérabilité CRITICAL
+  # =============================================================
+  DeployOnVM:
+    name: Build & Deploy on Azure VM
+    runs-on: [self-hosted, Linux, X64]
+    needs: SecurityGate
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Deploy via SSH on Azure VM
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          script: |
+            set -e
+
+            echo "📁 Accès au HOME utilisateur"
+            cd ~
+
+            # ---------------------------------------------------
+            # Clone si nécessaire
+            # ---------------------------------------------------
+            if [ ! -d "MLops-Automation-Vulrability-Detection" ]; then
+              echo "📥 Clone initial du dépôt"
+              git clone https://github.com/${{ github.repository }}.git \
+                MLops-Automation-Vulrability-Detection
+            fi
+
+            echo "📂 Accès au dépôt"
+            cd MLops-Automation-Vulrability-Detection
+
+            echo "🔄 Mise à jour du code"
+            git pull origin main
+
+            # ---------------------------------------------------
+            # Build Docker image
+            # ---------------------------------------------------
+            echo "🐳 Build Docker image"
+            docker build -t mlapp:latest .
+
+            # ---------------------------------------------------
+            # Scan de sécurité de l'image Docker
+            # Blocage si CRITICAL détectée
+            # ---------------------------------------------------
+            echo "🔍 Scan de vulnérabilité de l’image Docker"
+
+            if ! command -v trivy &> /dev/null; then
+              echo "⚙️ Installation de Trivy"
+              sudo apt-get update -y
+              sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+              wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+              echo deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main | sudo tee /etc/apt/sources.list.d/trivy.list
+              sudo apt-get update -y
+              sudo apt-get install -y trivy
+            fi
+
+            trivy image --severity CRITICAL --exit-code 1 mlapp:latest
+
+            echo "✅ Aucune vulnérabilité CRITICAL détectée"
+
+            # ---------------------------------------------------
+            # Stop ancien container
+            # ---------------------------------------------------
+            echo "🛑 Arrêt ancien conteneur"
+            docker stop mlapp || true
+            docker rm mlapp || true
+
+            # ---------------------------------------------------
+            # Run nouveau container
+            # ---------------------------------------------------
+            echo "🚀 Démarrage nouveau conteneur"
+            docker run -d \
+              --name mlapp \
+              -p 80:80 \
+              mlapp:latest
+
+            echo "🎉 Déploiement sécurisé terminé"
+
+
+# =============================================================
+# Job 10 : HealthCheck
+# Objectif :
+# - Vérifier que le conteneur déployé est opérationnel
+# - Effectue un curl sur l’endpoint /health de l’application
+# Dépend du job Deploy
+# =============================================================
+  HealthCheck:
+    name: Check Deployed Service Health
+    runs-on: [self-hosted, Linux, X64]
+    needs: DeployOnVM
+    if: github.ref == 'refs/heads/main'
+    env:
+      PUBLIC_IP: ${{ secrets.SERVER_IP }}
+
+
+    steps:
+      # ---------------------------------------------------------
+      # Étape 1 : Pause pour laisser le conteneur démarrer
+      # ---------------------------------------------------------
+      - name: Wait for container to start
+        run: sleep 15
+
+      # ---------------------------------------------------------
+      # Étape 2 : Vérification de la santé de l’application
+      # - Le job échoue si l’endpoint ne répond pas en HTTP 200 hh/
+      # ---------------------------------------------------------
+      - name: Health check
+        run: |
+          curl -v http://$PUBLIC_IP:80/health || echo "Server unreachable"
+
