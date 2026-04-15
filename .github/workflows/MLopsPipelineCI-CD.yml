@@ -256,7 +256,7 @@ jobs:
             .venv/bin/pip install modelscan==0.8.7
 
         # ---------------------------------------------------------
-        # Étape 3 : Création du dossier des rapports ModelScan
+        # Étape 3 : Création du dossier des rapports ModelScan ;..
         # ---------------------------------------------------------
         - name: Create Reports Folder
           run: mkdir -p "reports/models/${{ env.TIMESTAMP }}/official"
