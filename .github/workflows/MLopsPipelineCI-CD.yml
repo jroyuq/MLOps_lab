@@ -261,7 +261,7 @@ jobs:
         - name: Create Reports Folder
           run: mkdir -p "reports/models/${{ env.TIMESTAMP }}/official"
 
-        # ---------------------------------------------------------
+        # ---------------------------------------------------------------
         # Étape 4 : Scan des modèles ML + génération JSON
         # ---------------------------------------------------------
         - name: Run ModelScan and generate JSON compatible CVEEnrichment
